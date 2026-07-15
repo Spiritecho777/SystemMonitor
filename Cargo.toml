@@ -1,6 +1,17 @@
 [package]
 name = "SystemMonitor"
-version = "0.1.0"
-edition = "2024"
+version = "1.0.0"
+edition = "2021"
 
 [dependencies]
+eframe = "0.27"
+egui_extras = { version = "0.27", default-features = false }
+egui_plot = "0.27"
+sysinfo = "0.30"
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
+
+#egui eclaté il faut passé par autre chose qui ne demande pas un putain de gpu
