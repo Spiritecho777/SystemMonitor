@@ -6,7 +6,6 @@ edition = "2021"
 [dependencies]
 fltk = { version = "1", features = ["fltk-bundled"] }
 sysinfo = "0.30"
-group = "0.14.0"
 
 [profile.release]
 opt-level = 3

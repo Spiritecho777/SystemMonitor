@@ -49,6 +49,13 @@ impl ProcessMonitor {
             .collect()
     }
 
+    /// Tue le process `pid`. Grace a la capability CAP_KILL attachee au
+    /// binaire via `setcap` a l'installation (voir install.sh), ce kill
+    /// fonctionne aussi bien pour nos propres process que pour ceux
+    /// d'autres utilisateurs -- pas besoin de demon ni de logique
+    /// d'escalade separee, sysinfo appelle kill(2) en interne et le
+    /// kernel autorise l'appel des lors que le processus courant a
+    /// CAP_KILL en effectif.
     pub fn kill(&self, pid: u32) -> bool {
         if let Some(proc_) = self.sys.process(Pid::from_u32(pid)) {
             proc_.kill()
