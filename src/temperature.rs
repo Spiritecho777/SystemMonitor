@@ -1,6 +1,5 @@
 use sysinfo::Components;
 
-/// Une sonde de température (CPU, GPU, chipset, disque...).
 #[derive(Clone, Debug)]
 pub struct SensorReading {
     pub label: String,
@@ -8,12 +7,6 @@ pub struct SensorReading {
     pub max: Option<f32>,
     pub critical: Option<f32>,
 }
-
-/// Wrapper autour de `sysinfo::Components`, qui lit :
-/// - Linux : /sys/class/hwmon/*
-/// - Windows : MSAcpi_ThermalZoneTemperature via WMI (souvent limité/absent
-///   selon le BIOS -- voir la note dans le README pour un fallback
-///   LibreHardwareMonitor si tu as besoin de plus de précision)
 pub struct TemperatureMonitor {
     components: Components,
 }
@@ -21,28 +14,51 @@ pub struct TemperatureMonitor {
 impl TemperatureMonitor {
     pub fn new() -> Self {
         let components = Components::new_with_refreshed_list();
+
+        //DEBUG
+        eprintln!(
+            "[diag] TemperatureMonitor::new() -> {} composant(s) énuméré(s) par sysinfo",
+            components.len()
+        );
+        for c in components.iter() {
+            eprintln!(
+                "[diag]   - label={:?} id={:?} temperature={:?}",
+                c.label(),
+                c.id(),
+                c.temperature()
+            );
+        }
+        if components.is_empty() {
+            eprintln!(
+                "[diag] Aucun composant énuméré du tout : le kernel ne remonte rien \
+                 via /sys/class/hwmon (VM, module coretemp/k10temp non chargé, ou \
+                 plateforme sans capteur hwmon standard comme le Raspberry Pi)."
+            );
+        }
+        //DEBUG
+
         Self { components }
     }
 
     pub fn refresh(&mut self) {
-        self.components.refresh();
+        self.components = Components::new_with_refreshed_list();
     }
 
     pub fn readings(&self) -> Vec<SensorReading> {
         self.components
             .iter()
-            .map(|c| SensorReading {
-                label: c.label().to_string(),
-                temperature: c.temperature(),
-                max: Some(c.max()).filter(|v| *v > 0.0),
-                critical: c.critical(),
+            .filter_map(|c| {
+                let temperature = c.temperature()?;
+                Some(SensorReading {
+                    label: c.label().to_string(),
+                    temperature,
+                    max: c.max().filter(|v| *v > 0.0),
+                    critical: c.critical(),
+                })
             })
             .collect()
     }
 
-    /// Pas de capteur trouvé = probablement un Windows sans WMI thermal zone
-    /// exposée, ou une VM. On le signale explicitement dans l'UI plutôt que
-    /// d'afficher un tableau vide sans explication.
     pub fn has_sensors(&self) -> bool {
         !self.components.is_empty()
     }
