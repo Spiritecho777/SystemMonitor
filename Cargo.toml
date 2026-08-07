@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 fltk = { version = "1", features = ["fltk-bundled"] }
+fltk-theme = "0.7"
 sysinfo = "0.39.6"
 
 [profile.release]

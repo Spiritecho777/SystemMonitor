@@ -7,6 +7,7 @@ name = "SystemMonitor"
 version = "1.0.0"
 dependencies = [
  "fltk",
+ "fltk-theme",
  "sysinfo",
 ]
 
@@ -94,6 +95,15 @@ checksum = "6d9c99e29458923abe3f07b7f8a3bc5b5de3a2c04ad82273fd96402b3666ed06"
 dependencies = [
  "cmake",
  "cmk",
+]
+
+[[package]]
+name = "fltk-theme"
+version = "0.7.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8eac14d47a555db231b4ce9729118a7c57c8a21714af008b8e9ae627998edb7a"
+dependencies = [
+ "fltk",
 ]
 
 [[package]]

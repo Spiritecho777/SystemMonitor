@@ -9,8 +9,8 @@ use std::rc::Rc;
 use fltk::{
     app,
     button::Button,
-    draw,
     dialog,
+    draw,
     enums::{Align, Color, Event, Font, FrameType},
     frame::Frame,
     group::{Flex, Group, Tabs},
@@ -19,13 +19,24 @@ use fltk::{
     table::{Table, TableContext},
     window::Window,
 };
+use fltk_theme::{color_themes, ColorTheme, SchemeType, WidgetScheme};
 
 use process_monitor::ProcessRow;
 use services::{ServiceAction, ServiceRow};
 use state::{human_bytes, AppState, HISTORY_LEN};
 
 const REFRESH_MS: i32 = 1500;
-const ROW_HEIGHT: i32 = 24;
+const ROW_HEIGHT: i32 = 26;
+const COL_HEADER_HEIGHT: i32 = 28;
+
+const ACCENT: (u8, u8, u8) = (0xbd, 0x93, 0xf9); // violet Dracula
+const ACCENT_WARN: (u8, u8, u8) = (0xff, 0xb8, 0x6c); // orange Dracula
+const ACCENT_CRIT: (u8, u8, u8) = (0xff, 0x55, 0x55); // rouge Dracula
+const HEADER_BG: (u8, u8, u8) = (0x44, 0x47, 0x5a);
+const ROW_BG_EVEN: (u8, u8, u8) = (0x28, 0x2a, 0x36);
+const ROW_BG_ODD: (u8, u8, u8) = (0x21, 0x22, 0x2c);
+const TEXT_LIGHT: (u8, u8, u8) = (0xf8, 0xf8, 0xf2);
+const TEXT_DARK: (u8, u8, u8) = (0x1e, 0x1f, 0x29);
 
 #[derive(Clone, Copy, PartialEq)]
 enum SortKey {
@@ -36,41 +47,22 @@ enum SortKey {
     Status,
 }
 
-// Colonnes de l'onglet "Détails" (seul onglet de processus désormais --
-// l'onglet "Processus" simplifié a été retiré : redondant avec Détails,
-// qui reste la vue de référence).
 const COLUMN_TITLES: [&str; 5] = ["Nom", "PID", "CPU %", "Mémoire", "Statut"];
 const COLUMN_KEYS: [SortKey; 5] = [SortKey::Name, SortKey::Pid, SortKey::Cpu, SortKey::Memory, SortKey::Status];
+const DETAILS_COL_WEIGHTS: [i32; 5] = [4, 2, 2, 2, 2];
 
 const SERVICE_COLUMN_TITLES: [&str; 3] = ["Nom", "État", "Description"];
+const SERVICE_COL_WEIGHTS: [i32; 3] = [2, 2, 6];
 
 // --- Géométrie explicite pour Tabs et ses pages ---
-//
-// IMPORTANT : contrairement à Flex, `Fl_Tabs` ne recalcule PAS
-// automatiquement la position/taille de ses enfants au moment de
-// `.end()`, et surtout n'est PAS conçu pour accepter des `Flex` comme
-// enfants directs -- Tabs attend des `Fl_Group` classiques (dont il lit
-// le label pour construire sa barre d'onglets cliquable en haut). En
-// utilisant Flex directement comme page d'onglet, Tabs ne les traite
-// pas comme des pages exclusives : plusieurs onglets s'affichaient
-// simultanément, côte à côte, chacun réduit à sa largeur minimale.
-//
-// La correction : Tabs contient des `Group` simples (label = titre de
-// l'onglet), et c'est À L'INTÉRIEUR de chaque Group qu'on remet du Flex
-// pour l'agencement interne (header + table) -- ça isole complètement
-// les deux mécanismes de layout, chacun dans son cas d'usage prévu.
-//
-// Ces coordonnées sont des valeurs ABSOLUES explicites (pas de layout
-// dynamique via Flex ici). Limite acceptée : au redimensionnement de la
-// fenêtre, la zone des onglets ne se réajustera pas aussi finement que
-// le reste de l'UI (piloté par Flex) -- compromis nécessaire pour que
-// Tabs fonctionne correctement.
+// (Fl_Tabs exige des Group comme enfants directs, pas des Flex -- d'où
+// les coordonnées absolues plutôt qu'un layout Flex dynamique ici.)
 const WINDOW_W: i32 = 1150;
 const WINDOW_H: i32 = 700;
-const TOP_BAR_H: i32 = 28;
+const TOP_BAR_H: i32 = 32;
 const SEP_W: i32 = 2;
 const RIGHT_PANEL_W: i32 = 340;
-const TAB_BAR_H: i32 = 30; // hauteur de la barre d'onglets cliquable, réservée par Fl_Tabs
+const TAB_BAR_H: i32 = 32;
 
 const TABS_X: i32 = 0;
 const TABS_Y: i32 = TOP_BAR_H;
@@ -82,8 +74,7 @@ const PAGE_Y: i32 = TABS_Y + TAB_BAR_H;
 const PAGE_W: i32 = TABS_W;
 const PAGE_H: i32 = TABS_H - TAB_BAR_H;
 
-/// Tout ce qui doit survivre entre les callbacks (state applicatif + widgets
-/// à rafraîchir + état d'UI transitoire comme le tri/le filtre/la sélection).
+/// Tout ce qui doit survivre entre les callbacks.
 struct Shared {
     app_state: AppState,
     filtered_rows: Vec<ProcessRow>,
@@ -91,7 +82,6 @@ struct Shared {
     sort_desc: bool,
     filter_text: String,
     selected_pid: Option<u32>,
-    /// Filtre texte pour l'onglet Services (indépendant du filtre process).
     service_filter_text: String,
     filtered_services: Vec<ServiceRow>,
     selected_service: Option<String>,
@@ -142,77 +132,140 @@ impl Shared {
     }
 }
 
-/// Construit une ligne d'en-tête de colonnes stylée (UpBox + gras).
-fn build_header_row(titles: &[&str]) -> (Flex, Vec<Frame>) {
-    let header = Flex::default().row();
-    let mut labels = Vec::new();
-    for title in titles {
-        let mut lbl = Frame::default().with_label(title);
-        lbl.set_frame(FrameType::UpBox);
-        lbl.set_label_font(Font::HelveticaBold);
-        labels.push(lbl);
-    }
-    header.end();
-    (header, labels)
+/// Dessine une cellule d'en-tête de colonne NATIVE (contexte ColHeader de
+/// Fl_Table) : fond coloré façon bouton, titre, et flèche ▼/▲ optionnelle
+/// si cette colonne est la colonne de tri actuellement active.
+///
+/// IMPORTANT -- pourquoi un en-tête natif plutôt que des Frame séparés :
+/// le glisser-déposer pour redimensionner une colonne (col_resize) est
+/// une fonctionnalité gérée EXCLUSIVEMENT par l'en-tête natif de
+/// Fl_Table (zone de détection de bordure + curseur de redimensionnement
+/// intégrés au widget). Avec `set_col_header(false)` et un en-tête
+/// "maison" fait de Frame au-dessus du tableau (l'ancienne approche),
+/// `set_col_resize(true)` reste inerte : il n'existe tout simplement
+/// aucune bordure d'en-tête native à saisir à la souris. En dessinant
+/// notre style DANS le contexte ColHeader natif (plutôt qu'à côté), on
+/// garde exactement le même rendu visuel tout en récupérant le
+/// redimensionnement au glisser gratuitement, géré par FLTK lui-même.
+fn draw_col_header_cell(title: &str, sort_arrow: Option<&str>, x: i32, y: i32, w: i32, h: i32) {
+    draw::push_clip(x, y, w, h);
+    draw::draw_box(FrameType::UpBox, x, y, w, h, Color::from_rgb(HEADER_BG.0, HEADER_BG.1, HEADER_BG.2));
+    draw::set_draw_color(Color::from_rgb(TEXT_LIGHT.0, TEXT_LIGHT.1, TEXT_LIGHT.2));
+    draw::set_font(Font::HelveticaBold, 13);
+    let label = match sort_arrow {
+        Some(arrow) => format!("{title}{arrow}"),
+        None => title.to_string(),
+    };
+    draw::draw_text2(&label, x + 6, y, w - 8, h, Align::Left);
+    draw::pop_clip();
 }
 
-/// Câble le clic sur un en-tête de colonne pour trier `shared`.
-fn wire_sortable_header(header_labels: Vec<Frame>, keys: &'static [SortKey], shared: &Rc<RefCell<Shared>>, table: &Table) {
-    for (i, mut lbl) in header_labels.into_iter().enumerate() {
-        let shared = shared.clone();
-        let mut table_clone = table.clone();
-        lbl.handle(move |_widget, ev| {
-            if ev == Event::Push {
-                let mut sh = shared.borrow_mut();
-                let key = keys[i];
-                if sh.sort_key == key {
-                    sh.sort_desc = !sh.sort_desc;
-                } else {
-                    sh.sort_key = key;
-                    sh.sort_desc = true;
-                }
-                sh.recompute_rows();
-                let n = sh.filtered_rows.len() as i32;
-                drop(sh);
-                table_clone.set_rows(n);
-                table_clone.redraw();
-                return true;
-            }
-            false
-        });
+/// Répartit la largeur DISPONIBLE de `table` entre ses colonnes,
+/// proportionnellement aux `weights` fournis. Utilisé UNIQUEMENT à la
+/// construction initiale -- voir `scale_col_widths` pour le
+/// réajustement au redimensionnement de fenêtre, qui préserve lui les
+/// largeurs choisies manuellement par l'utilisateur (glisser-déposer).
+fn apply_weighted_col_widths(table: &mut Table, weights: &[i32]) {
+    let total_weight: i32 = weights.iter().sum();
+    if total_weight <= 0 {
+        return;
     }
+    let available = table.w();
+    let n = weights.len();
+    let mut used = 0;
+    for (i, w) in weights.iter().enumerate() {
+        let width = if i == n - 1 {
+            (available - used).max(20)
+        } else {
+            ((available as i64 * *w as i64) / total_weight as i64).max(20) as i32
+        };
+        table.set_col_width(i as i32, width);
+        used += width;
+    }
+    table.redraw();
+}
+
+/// Réajuste les largeurs de colonnes existantes proportionnellement au
+/// changement de largeur globale du tableau (ratio nouvelle/ancienne
+/// largeur), plutôt que de les réinitialiser aux poids par défaut.
+///
+/// IMPORTANT : contrairement à `apply_weighted_col_widths` (utilisée une
+/// seule fois à la construction), cette fonction PRÉSERVE les largeurs
+/// que l'utilisateur aurait ajustées manuellement en glissant une
+/// bordure de colonne -- redimensionner la fenêtre ne doit pas annuler
+/// un ajustement manuel de l'utilisateur, seulement adapter proportion-
+/// nellement ce qui existe déjà à la nouvelle taille disponible.
+fn scale_col_widths(table: &mut Table, last_width: &mut i32) {
+    let new_w = table.w();
+    if *last_width <= 0 || new_w <= 0 || new_w == *last_width {
+        *last_width = new_w;
+        return;
+    }
+    let ratio = new_w as f64 / *last_width as f64;
+    let cols = table.cols();
+    if cols <= 0 {
+        *last_width = new_w;
+        return;
+    }
+    let mut total = 0;
+    for c in 0..cols {
+        let w = table.col_width(c);
+        let neww = ((w as f64) * ratio).round().max(20.0) as i32;
+        table.set_col_width(c, neww);
+        total += neww;
+    }
+    // La dernière colonne absorbe l'écart d'arrondi pour que la somme
+    // corresponde exactement à la largeur disponible.
+    let last_col = cols - 1;
+    let current_last = table.col_width(last_col);
+    let diff = new_w - total;
+    table.set_col_width(last_col, (current_last + diff).max(20));
+    table.redraw();
+    *last_width = new_w;
 }
 
 fn main() {
     let app = app::App::default();
+
+    let theme = ColorTheme::new(color_themes::DARK_THEME);
+    theme.apply();
+    let scheme = WidgetScheme::new(SchemeType::Fluent);
+    scheme.apply();
+
     app::set_visible_focus(false);
+    app::set_font_size(13);
 
     let mut window = Window::default().with_size(WINDOW_W, WINDOW_H).with_label("Gestionnaire de tâches");
+    window.set_color(Color::from_rgb(TEXT_DARK.0, TEXT_DARK.1, TEXT_DARK.2));
 
     let mut root = Flex::default_fill().column();
+    root.set_margin(8);
+    root.set_pad(8);
 
     // --- barre du haut : CPU / RAM ---
     let mut top_bar = Flex::default().row();
     top_bar.set_frame(FrameType::FlatBox);
+    top_bar.set_color(Color::from_rgb(ROW_BG_EVEN.0, ROW_BG_EVEN.1, ROW_BG_EVEN.2));
     let mut cpu_label = Frame::default().with_label("CPU : --");
     cpu_label.set_align(Align::Left | Align::Inside);
+    cpu_label.set_label_font(Font::HelveticaBold);
+    cpu_label.set_label_size(14);
     let mut ram_label = Frame::default().with_label("RAM : --");
     ram_label.set_align(Align::Left | Align::Inside);
+    ram_label.set_label_font(Font::HelveticaBold);
+    ram_label.set_label_size(14);
     top_bar.end();
     root.fixed(&top_bar, TOP_BAR_H);
 
     // --- corps : onglets (gauche) + panneau graphes (droite) ---
     let mut body = Flex::default().row();
+    body.set_pad(8);
 
-    // ===== onglets : Détails / Services =====
     let mut tabs = Tabs::new(TABS_X, TABS_Y, TABS_W, TABS_H, None);
+    tabs.set_frame(FrameType::FlatBox);
 
-    // Variables déclarées ici (affectées dans les blocs ci-dessous) car
-    // elles doivent survivre à la construction pour être câblées plus
-    // bas (callbacks) et rafraîchies périodiquement (refresh_widgets).
     let mut filter_input: Input;
     let mut table: Table;
-    let header_labels: Vec<Frame>;
     let mut table_services: Table;
     let mut service_filter_input: Input;
     let mut btn_start: Button;
@@ -220,106 +273,130 @@ fn main() {
     let mut btn_restart: Button;
     let mut service_status_label: Frame;
 
-    // --- Onglet "Détails" (seul onglet de processus) ---
+    // --- Onglet "Détails" ---
     {
-        let mut grp_details = Group::new(PAGE_X, PAGE_Y, PAGE_W, PAGE_H, "Détails");
+        let mut grp_details = Group::new(PAGE_X, PAGE_Y, PAGE_W, PAGE_H, "  Processus  ");
 
         let mut tab_details = Flex::new(PAGE_X, PAGE_Y, PAGE_W, PAGE_H, None).column();
+        tab_details.set_margin(6);
+        tab_details.set_pad(6);
 
         filter_input = Input::default();
         filter_input.set_tooltip("Filtrer par nom de process");
-        tab_details.fixed(&filter_input, 28);
-
-        let (header, labels) = build_header_row(&COLUMN_TITLES);
-        tab_details.fixed(&header, 22);
-        header_labels = labels;
+        filter_input.set_text_size(13);
+        tab_details.fixed(&filter_input, 30);
 
         table = Table::default();
         table.set_rows(0);
         table.set_row_header(false);
         table.set_cols(COLUMN_TITLES.len() as i32);
-        table.set_col_header(false); // en-tête géré à la main juste au-dessus (colonnes cliquables pour le tri)
+        // En-tête NATIF (pas de Frame séparés) : condition nécessaire
+        // pour que le glisser-déposer de redimensionnement fonctionne
+        // réellement -- voir draw_col_header_cell ci-dessus.
+        table.set_col_header(true);
+        table.set_col_header_height(COL_HEADER_HEIGHT);
         table.set_row_height_all(ROW_HEIGHT);
         table.set_col_resize(true);
+        table.set_col_resize_min(40);
         table.end();
 
         tab_details.end();
         grp_details.end();
+
+        apply_weighted_col_widths(&mut table, &DETAILS_COL_WEIGHTS);
     }
 
     // --- Onglet "Services" ---
     {
-        let mut grp_services = Group::new(PAGE_X, PAGE_Y, PAGE_W, PAGE_H, "Services");
+        let mut grp_services = Group::new(PAGE_X, PAGE_Y, PAGE_W, PAGE_H, "  Services  ");
 
         let mut tab_services = Flex::new(PAGE_X, PAGE_Y, PAGE_W, PAGE_H, None).column();
+        tab_services.set_margin(6);
+        tab_services.set_pad(6);
 
         service_filter_input = Input::default();
         service_filter_input.set_tooltip("Filtrer par nom ou description de service");
-        tab_services.fixed(&service_filter_input, 28);
-
-        let (header, _labels) = build_header_row(&SERVICE_COLUMN_TITLES);
-        tab_services.fixed(&header, 22);
-        // Pas de tri cliquable sur cette table pour l'instant.
+        service_filter_input.set_text_size(13);
+        tab_services.fixed(&service_filter_input, 30);
 
         table_services = Table::default();
         table_services.set_rows(0);
         table_services.set_row_header(false);
         table_services.set_cols(SERVICE_COLUMN_TITLES.len() as i32);
-        table_services.set_col_header(false);
+        table_services.set_col_header(true);
+        table_services.set_col_header_height(COL_HEADER_HEIGHT);
         table_services.set_row_height_all(ROW_HEIGHT);
         table_services.set_col_resize(true);
+        table_services.set_col_resize_min(40);
         table_services.end();
 
-        // Barre de contrôle : Démarrer / Arrêter / Redémarrer.
         let mut control_bar = Flex::default().row();
-        btn_start = Button::default().with_label("Démarrer");
-        btn_stop = Button::default().with_label("Arrêter");
-        btn_restart = Button::default().with_label("Redémarrer");
+        control_bar.set_pad(8);
+        btn_start = Button::default().with_label("▶  Démarrer");
+        btn_start.set_color(Color::from_rgb(0x50, 0xfa, 0x7b));
+        btn_start.set_label_color(Color::from_rgb(TEXT_DARK.0, TEXT_DARK.1, TEXT_DARK.2));
+        btn_stop = Button::default().with_label("■  Arrêter");
+        btn_stop.set_color(Color::from_rgb(ACCENT_CRIT.0, ACCENT_CRIT.1, ACCENT_CRIT.2));
+        btn_stop.set_label_color(Color::from_rgb(TEXT_DARK.0, TEXT_DARK.1, TEXT_DARK.2));
+        btn_restart = Button::default().with_label("⟳  Redémarrer");
+        btn_restart.set_color(Color::from_rgb(ACCENT_WARN.0, ACCENT_WARN.1, ACCENT_WARN.2));
+        btn_restart.set_label_color(Color::from_rgb(TEXT_DARK.0, TEXT_DARK.1, TEXT_DARK.2));
         control_bar.end();
-        tab_services.fixed(&control_bar, 30);
+        tab_services.fixed(&control_bar, 34);
 
         service_status_label = Frame::default().with_label("Sélectionne un service ci-dessus.");
         service_status_label.set_align(Align::Left | Align::Inside | Align::Wrap);
+        service_status_label.set_label_size(12);
         tab_services.fixed(&service_status_label, 40);
 
         tab_services.end();
         grp_services.end();
+
+        apply_weighted_col_widths(&mut table_services, &SERVICE_COL_WEIGHTS);
     }
 
     tabs.end();
 
-    // séparateur visuel
     let mut sep = Frame::default();
-    sep.set_frame(FrameType::ThinDownFrame);
+    sep.set_frame(FrameType::FlatBox);
+    sep.set_color(Color::from_rgb(HEADER_BG.0, HEADER_BG.1, HEADER_BG.2));
     body.fixed(&sep, SEP_W);
 
     // ===== droite : graphes =====
     let mut right = Flex::default().column();
+    right.set_pad(6);
     body.fixed(&right, RIGHT_PANEL_W);
 
     let mut temp_plot_heading = Frame::default().with_label("Historique température");
     temp_plot_heading.set_label_font(Font::HelveticaBold);
+    temp_plot_heading.set_label_size(14);
     temp_plot_heading.set_align(Align::Left | Align::Inside);
-    right.fixed(&temp_plot_heading, 22);
+    right.fixed(&temp_plot_heading, 24);
 
     let mut temp_plot = Frame::default();
-    temp_plot.set_frame(FrameType::DownBox);
+    temp_plot.set_frame(FrameType::RoundedBox);
+    temp_plot.set_color(Color::from_rgb(ROW_BG_EVEN.0, ROW_BG_EVEN.1, ROW_BG_EVEN.2));
     right.fixed(&temp_plot, 220);
 
     let mut cpu_plot_heading = Frame::default().with_label("Historique CPU");
     cpu_plot_heading.set_label_font(Font::HelveticaBold);
+    cpu_plot_heading.set_label_size(14);
     cpu_plot_heading.set_align(Align::Left | Align::Inside);
-    right.fixed(&cpu_plot_heading, 22);
+    right.fixed(&cpu_plot_heading, 24);
 
     let mut cpu_plot = Frame::default();
-    cpu_plot.set_frame(FrameType::DownBox);
+    cpu_plot.set_frame(FrameType::RoundedBox);
+    cpu_plot.set_color(Color::from_rgb(ROW_BG_EVEN.0, ROW_BG_EVEN.1, ROW_BG_EVEN.2));
     right.fixed(&cpu_plot, 200);
 
-    let mut kill_button = Button::default().with_label("Tuer le process sélectionné");
-    right.fixed(&kill_button, 30);
+    let mut kill_button = Button::default().with_label("✕  Tuer le process sélectionné");
+    kill_button.set_color(Color::from_rgb(ACCENT_CRIT.0, ACCENT_CRIT.1, ACCENT_CRIT.2));
+    kill_button.set_label_color(Color::from_rgb(TEXT_DARK.0, TEXT_DARK.1, TEXT_DARK.2));
+    right.fixed(&kill_button, 34);
 
     let mut selection_label = Frame::default().with_label("Aucune sélection");
     selection_label.set_align(Align::Left | Align::Inside);
+    selection_label.set_label_size(12);
     right.fixed(&selection_label, 22);
 
     right.end();
@@ -329,6 +406,92 @@ fn main() {
     window.end();
     window.make_resizable(true);
     window.show();
+
+    // --- Finalisation des largeurs de colonnes : double filet de sécurité ---
+    //
+    // HISTORIQUE DU PROBLÈME (pour référence future) : ni un appel direct
+    // après window.show(), ni un timeout à 0 seconde n'ont suffi en
+    // pratique à obtenir un table.w() reflétant la largeur réellement
+    // affichée -- les colonnes restaient minuscules (largeurs par défaut
+    // de Fl_Table) avec un grand espace vide à droite, quel que soit le
+    // délai ajouté avant l'appel. Cela suggère que Fl_Table peut recevoir
+    // sa taille définitive de la part de Fl_Flex en PLUSIEURS passes de
+    // layout successives (pas une seule, synchrone), potentiellement même
+    // après le tout premier passage de la boucle d'événements.
+    //
+    // STRATÉGIE RETENUE : plutôt que de deviner un délai arbitraire, on
+    // s'appuie sur un signal fiable émis par FLTK lui-même --
+    // Event::Resize sur la fenêtre. Ce signal peut se déclencher au moins
+    // une fois même sans intervention de l'utilisateur (lors du tout
+    // premier affichage, sur certaines plateformes/window managers). On
+    // combine donc DEUX mécanismes complémentaires :
+    //   1. Un timeout répété (toutes les 100ms, jusqu'à 20 tentatives)
+    //      qui vérifie si table.w() a atteint une taille "raisonnable"
+    //      (> 150px, largement supérieur à la somme des largeurs minimales
+    //      de colonnes) avant d'appliquer la répartition pondérée -- et
+    //      qui arrête de se répéter dès que l'application a réussi.
+    //   2. Le hook Event::Resize existant, qui applique la répartition
+    //      pondérée UNE SEULE FOIS (au premier redimensionnement détecté,
+    //      quelle qu'en soit la cause), puis bascule ensuite sur
+    //      scale_col_widths (qui préserve les ajustements manuels de
+    //      l'utilisateur) pour tous les redimensionnements suivants.
+    // Les deux mécanismes sont idempotents et sans effet de bord négatif
+    // s'ils s'exécutent tous les deux -- le premier qui réussit "gagne".
+    const COL_WIDTH_MIN_SANE: i32 = 150;
+    const COL_WIDTH_RETRY_MS: f64 = 0.1;
+    const COL_WIDTH_MAX_RETRIES: u32 = 20;
+
+    fn try_apply_initial_widths(table: &mut Table, table_services: &mut Table, retries_left: u32) {
+        let ready = table.w() > COL_WIDTH_MIN_SANE && table_services.w() > COL_WIDTH_MIN_SANE;
+        if ready {
+            apply_weighted_col_widths(table, &DETAILS_COL_WEIGHTS);
+            apply_weighted_col_widths(table_services, &SERVICE_COL_WEIGHTS);
+            return;
+        }
+        if retries_left == 0 {
+            // Dernier recours : applique quand même avec la largeur
+            // disponible actuelle, même si elle semble suspecte -- mieux
+            // que de ne jamais rien appliquer du tout.
+            apply_weighted_col_widths(table, &DETAILS_COL_WEIGHTS);
+            apply_weighted_col_widths(table_services, &SERVICE_COL_WEIGHTS);
+            return;
+        }
+        let mut table = table.clone();
+        let mut table_services = table_services.clone();
+        app::add_timeout3(COL_WIDTH_RETRY_MS, move |_handle| {
+            try_apply_initial_widths(&mut table, &mut table_services, retries_left - 1);
+        });
+    }
+    try_apply_initial_widths(&mut table.clone(), &mut table_services.clone(), COL_WIDTH_MAX_RETRIES);
+
+    // --- Réajustement des colonnes au redimensionnement de la fenêtre ---
+    {
+        let mut table_for_resize = table.clone();
+        let mut table_services_for_resize = table_services.clone();
+        let mut last_details_w = table.w();
+        let mut last_services_w = table_services.w();
+        let mut first_resize_done = false;
+        window.handle(move |_w, ev| {
+            if ev == Event::Resize {
+                if !first_resize_done {
+                    // Premier redimensionnement détecté (même celui lié à
+                    // l'affichage initial) : applique la répartition
+                    // pondérée avec la largeur désormais forcément réelle,
+                    // plutôt qu'un simple scale d'une valeur potentiellement
+                    // encore incorrecte capturée trop tôt.
+                    apply_weighted_col_widths(&mut table_for_resize, &DETAILS_COL_WEIGHTS);
+                    apply_weighted_col_widths(&mut table_services_for_resize, &SERVICE_COL_WEIGHTS);
+                    first_resize_done = true;
+                } else {
+                    scale_col_widths(&mut table_for_resize, &mut last_details_w);
+                    scale_col_widths(&mut table_services_for_resize, &mut last_services_w);
+                }
+                last_details_w = table_for_resize.w();
+                last_services_w = table_services_for_resize.w();
+            }
+            false
+        });
+    }
 
     // --- état partagé ---
     let shared = Rc::new(RefCell::new(Shared {
@@ -348,10 +511,22 @@ fn main() {
         sh.recompute_services();
     }
 
-    // --- dessin des cellules : table "Détails" ---
+    // --- dessin des cellules : table "Détails" (ColHeader + Cell) ---
     {
         let shared = shared.clone();
         table.draw_cell(move |t, ctx, row, col, x, y, w, h| match ctx {
+            TableContext::ColHeader => {
+                let sh = shared.borrow();
+                let idx = col as usize;
+                let arrow = if idx < COLUMN_KEYS.len() && COLUMN_KEYS[idx] == sh.sort_key {
+                    Some(if sh.sort_desc { " ▼" } else { " ▲" })
+                } else {
+                    None
+                };
+                let title = COLUMN_TITLES.get(idx).copied().unwrap_or("");
+                draw_col_header_cell(title, arrow, x, y, w, h);
+                let _ = t;
+            }
             TableContext::Cell => {
                 let sh = shared.borrow();
                 let is_selected = sh
@@ -361,7 +536,13 @@ fn main() {
                     .unwrap_or(false);
 
                 draw::push_clip(x, y, w, h);
-                draw::set_draw_color(if is_selected { Color::Selection } else { Color::Background2 });
+                draw::set_draw_color(if is_selected {
+                    Color::from_rgb(ACCENT.0, ACCENT.1, ACCENT.2)
+                } else if row % 2 == 0 {
+                    Color::from_rgb(ROW_BG_EVEN.0, ROW_BG_EVEN.1, ROW_BG_EVEN.2)
+                } else {
+                    Color::from_rgb(ROW_BG_ODD.0, ROW_BG_ODD.1, ROW_BG_ODD.2)
+                });
                 draw::draw_rectf(x, y, w, h);
 
                 if let Some(r) = sh.filtered_rows.get(row as usize) {
@@ -373,13 +554,15 @@ fn main() {
                         4 => r.status.clone(),
                         _ => String::new(),
                     };
-                    draw::set_draw_color(if is_selected { Color::White } else { Color::Foreground });
+                    draw::set_draw_color(if is_selected {
+                        Color::from_rgb(TEXT_DARK.0, TEXT_DARK.1, TEXT_DARK.2)
+                    } else {
+                        Color::from_rgb(TEXT_LIGHT.0, TEXT_LIGHT.1, TEXT_LIGHT.2)
+                    });
                     draw::set_font(Font::Helvetica, 13);
-                    draw::draw_text2(&text, x + 4, y, w - 4, h, Align::Left);
+                    draw::draw_text2(&text, x + 8, y, w - 8, h, Align::Left);
                 }
 
-                draw::set_draw_color(Color::Light2);
-                draw::draw_rect(x, y, w, h);
                 draw::pop_clip();
                 let _ = t;
             }
@@ -387,10 +570,15 @@ fn main() {
         });
     }
 
-    // --- dessin des cellules : table "Services" ---
+    // --- dessin des cellules : table "Services" (ColHeader + Cell) ---
     {
         let shared = shared.clone();
         table_services.draw_cell(move |t, ctx, row, col, x, y, w, h| match ctx {
+            TableContext::ColHeader => {
+                let title = SERVICE_COLUMN_TITLES.get(col as usize).copied().unwrap_or("");
+                draw_col_header_cell(title, None, x, y, w, h);
+                let _ = t;
+            }
             TableContext::Cell => {
                 let sh = shared.borrow();
                 let is_selected = sh
@@ -400,7 +588,13 @@ fn main() {
                     .unwrap_or(false);
 
                 draw::push_clip(x, y, w, h);
-                draw::set_draw_color(if is_selected { Color::Selection } else { Color::Background2 });
+                draw::set_draw_color(if is_selected {
+                    Color::from_rgb(ACCENT.0, ACCENT.1, ACCENT.2)
+                } else if row % 2 == 0 {
+                    Color::from_rgb(ROW_BG_EVEN.0, ROW_BG_EVEN.1, ROW_BG_EVEN.2)
+                } else {
+                    Color::from_rgb(ROW_BG_ODD.0, ROW_BG_ODD.1, ROW_BG_ODD.2)
+                });
                 draw::draw_rectf(x, y, w, h);
 
                 if let Some(s) = sh.filtered_services.get(row as usize) {
@@ -410,13 +604,15 @@ fn main() {
                         2 => s.description.clone(),
                         _ => String::new(),
                     };
-                    draw::set_draw_color(if is_selected { Color::White } else { Color::Foreground });
+                    draw::set_draw_color(if is_selected {
+                        Color::from_rgb(TEXT_DARK.0, TEXT_DARK.1, TEXT_DARK.2)
+                    } else {
+                        Color::from_rgb(TEXT_LIGHT.0, TEXT_LIGHT.1, TEXT_LIGHT.2)
+                    });
                     draw::set_font(Font::Helvetica, 13);
-                    draw::draw_text2(&text, x + 4, y, w - 4, h, Align::Left);
+                    draw::draw_text2(&text, x + 8, y, w - 8, h, Align::Left);
                 }
 
-                draw::set_draw_color(Color::Light2);
-                draw::draw_rect(x, y, w, h);
                 draw::pop_clip();
                 let _ = t;
             }
@@ -424,15 +620,41 @@ fn main() {
         });
     }
 
-    // clic sur une ligne de process -> sélection (pour le bouton "Tuer")
+    // clic sur la table "Détails" -> distingue en-tête (tri) et cellule (sélection)
     {
         let shared = shared.clone();
         let mut selection_label = selection_label.clone();
         let mut table_clone = table.clone();
         table.handle(move |t, ev| {
-            if ev == Event::Push {
-                let (row, _col) = (t.callback_row(), t.callback_col());
-                if row >= 0 {
+            if ev != Event::Push {
+                return false;
+            }
+            match t.callback_context() {
+                TableContext::ColHeader => {
+                    let col = t.callback_col();
+                    if col < 0 || col as usize >= COLUMN_KEYS.len() {
+                        return false;
+                    }
+                    let mut sh = shared.borrow_mut();
+                    let key = COLUMN_KEYS[col as usize];
+                    if sh.sort_key == key {
+                        sh.sort_desc = !sh.sort_desc;
+                    } else {
+                        sh.sort_key = key;
+                        sh.sort_desc = true;
+                    }
+                    sh.recompute_rows();
+                    let n = sh.filtered_rows.len() as i32;
+                    drop(sh);
+                    table_clone.set_rows(n);
+                    table_clone.redraw();
+                    true
+                }
+                TableContext::Cell => {
+                    let row = t.callback_row();
+                    if row < 0 {
+                        return false;
+                    }
                     let mut sh = shared.borrow_mut();
                     if let Some(r) = sh.filtered_rows.get(row as usize) {
                         let (pid, name) = (r.pid, r.name.clone());
@@ -441,21 +663,21 @@ fn main() {
                     }
                     drop(sh);
                     table_clone.redraw();
-                    return true;
+                    true
                 }
+                _ => false,
             }
-            false
         });
     }
 
-    // clic sur une ligne de service -> sélection (pour Démarrer/Arrêter/Redémarrer)
+    // clic sur une ligne de service -> sélection (pas de tri sur cette table)
     {
         let shared = shared.clone();
         let mut service_status_label = service_status_label.clone();
         let mut table_services_clone = table_services.clone();
         table_services.handle(move |t, ev| {
-            if ev == Event::Push {
-                let (row, _col) = (t.callback_row(), t.callback_col());
+            if ev == Event::Push && t.callback_context() == TableContext::Cell {
+                let row = t.callback_row();
                 if row >= 0 {
                     let mut sh = shared.borrow_mut();
                     if let Some(s) = sh.filtered_services.get(row as usize) {
@@ -471,9 +693,6 @@ fn main() {
             false
         });
     }
-
-    // clic sur un en-tête de colonne "Détails" -> tri
-    wire_sortable_header(header_labels, &COLUMN_KEYS, &shared, &table);
 
     // filtre texte (onglet Détails)
     {
@@ -519,13 +738,6 @@ fn main() {
     }
 
     // Boutons Démarrer / Arrêter / Redémarrer (services)
-    //
-    // IMPORTANT : ces actions nécessitent des privilèges élevés (root sur
-    // Linux, administrateur sur Windows). Ce binaire ne demande aucune
-    // élévation automatique -- si l'action échoue par manque de droits,
-    // le message d'erreur système brut est affiché tel quel (boîte de
-    // dialogue + label), pour que l'utilisateur comprenne la vraie cause
-    // plutôt qu'un échec silencieux.
     for (btn, action) in [
         (&mut btn_start, ServiceAction::Start),
         (&mut btn_stop, ServiceAction::Stop),
@@ -551,9 +763,6 @@ fn main() {
             match result {
                 Ok(()) => {
                     service_status_label.set_label(&format!("OK : action appliquée sur {name}."));
-                    // Rafraîchissement immédiat pour refléter le nouvel état
-                    // sans attendre le prochain cycle throttlé (voir
-                    // state.rs::SERVICE_REFRESH_EVERY_N_TICKS).
                     let mut sh = shared.borrow_mut();
                     sh.app_state.service_monitor.refresh();
                     sh.recompute_services();
@@ -566,7 +775,7 @@ fn main() {
         });
     }
 
-    // --- graphes (dessin Cairo-like via le module `draw` de FLTK) ---
+    // --- graphes ---
     {
         let shared = shared.clone();
         cpu_plot.draw(move |f| {
@@ -654,10 +863,6 @@ fn refresh_widgets(
     table_services.set_rows(sh.filtered_services.len() as i32);
     table_services.redraw();
 
-    // Les closures .draw() de cpu_plot/temp_plot ne sont ré-invoquées par
-    // FLTK que sur un événement de "damage" explicite -- jamais
-    // automatiquement parce que cpu_history/temp_history ont changé en
-    // arrière-plan.
     cpu_plot.redraw();
     temp_plot.redraw();
 
@@ -669,7 +874,7 @@ fn draw_history(x: i32, y: i32, w: i32, h: i32, values: impl Iterator<Item = f64
     let range = (max - min).max(1.0);
 
     draw::push_clip(x, y, w, h);
-    draw::set_draw_color(Color::Light2);
+    draw::set_draw_color(Color::from_rgb(HEADER_BG.0, HEADER_BG.1, HEADER_BG.2));
     for i in 0..=4 {
         let gy = y + (h as f32 * (i as f32 / 4.0)) as i32;
         draw::draw_line(x, gy, x + w, gy);
@@ -677,7 +882,7 @@ fn draw_history(x: i32, y: i32, w: i32, h: i32, values: impl Iterator<Item = f64
 
     let points: Vec<f64> = values.collect();
     if points.len() >= 2 {
-        draw::set_draw_color(Color::from_rgb(0x33, 0x8c, 0xf2));
+        draw::set_draw_color(Color::from_rgb(ACCENT.0, ACCENT.1, ACCENT.2));
         draw::set_line_style(draw::LineStyle::Solid, 2);
         for i in 1..points.len() {
             let x0 = x + (w as f32 * ((i - 1) as f32 / (HISTORY_LEN.saturating_sub(1)) as f32)) as i32;
@@ -693,8 +898,7 @@ fn draw_history(x: i32, y: i32, w: i32, h: i32, values: impl Iterator<Item = f64
     draw::pop_clip();
 }
 
-/// Dessine l'historique ET des repères textuels directement sur le
-/// graphe : valeur courante, pic observé, et bornes min/max de l'échelle.
+/// Dessine l'historique ET des repères textuels directement sur le graphe.
 fn draw_history_annotated(
     x: i32,
     y: i32,
@@ -712,28 +916,30 @@ fn draw_history_annotated(
     let points: Vec<f64> = values.collect();
 
     draw::set_font(Font::HelveticaBold, 12);
-    draw::set_draw_color(Color::Foreground);
+    draw::set_draw_color(Color::from_rgb(TEXT_LIGHT.0, TEXT_LIGHT.1, TEXT_LIGHT.2));
 
-    draw::draw_text2(&format!("{max:.0}{unit}"), x + 2, y + 2, w - 4, 14, Align::Left | Align::Top);
-    draw::draw_text2(&format!("{min:.0}{unit}"), x + 2, y + h - 16, w - 4, 14, Align::Left | Align::Bottom);
+    draw::draw_text2(&format!("{max:.0}{unit}"), x + 6, y + 4, w - 8, 14, Align::Left | Align::Top);
+    draw::draw_text2(&format!("{min:.0}{unit}"), x + 6, y + h - 18, w - 8, 14, Align::Left | Align::Bottom);
 
     if let Some(&current) = points.last() {
+        draw::set_draw_color(Color::from_rgb(ACCENT.0, ACCENT.1, ACCENT.2));
         draw::draw_text2(
             &format!("{current:.1}{unit}"),
             x,
-            y + 2,
-            w - 4,
+            y + 4,
+            w - 8,
             16,
             Align::Right | Align::Top,
         );
     }
 
     if let Some(peak) = points.iter().copied().reduce(f64::max) {
+        draw::set_draw_color(Color::from_rgb(TEXT_LIGHT.0, TEXT_LIGHT.1, TEXT_LIGHT.2));
         draw::draw_text2(
             &format!("pic {peak:.1}{unit}"),
             x,
-            y + h - 18,
-            w - 4,
+            y + h - 20,
+            w - 8,
             16,
             Align::Right | Align::Bottom,
         );

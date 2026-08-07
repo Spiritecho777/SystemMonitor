@@ -14,29 +14,6 @@ pub struct TemperatureMonitor {
 impl TemperatureMonitor {
     pub fn new() -> Self {
         let components = Components::new_with_refreshed_list();
-
-        //DEBUG
-        eprintln!(
-            "[diag] TemperatureMonitor::new() -> {} composant(s) énuméré(s) par sysinfo",
-            components.len()
-        );
-        for c in components.iter() {
-            eprintln!(
-                "[diag]   - label={:?} id={:?} temperature={:?}",
-                c.label(),
-                c.id(),
-                c.temperature()
-            );
-        }
-        if components.is_empty() {
-            eprintln!(
-                "[diag] Aucun composant énuméré du tout : le kernel ne remonte rien \
-                 via /sys/class/hwmon (VM, module coretemp/k10temp non chargé, ou \
-                 plateforme sans capteur hwmon standard comme le Raspberry Pi)."
-            );
-        }
-        //DEBUG
-
         Self { components }
     }
 
