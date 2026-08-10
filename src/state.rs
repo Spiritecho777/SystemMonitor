@@ -6,25 +6,8 @@ use crate::temperature::{SensorReading, TemperatureMonitor};
 
 pub const HISTORY_LEN: usize = 120; // ~4 minutes d'historique à 2s/tick
 
-/// Seuil en dessous duquel une lecture de température est ignorée pour le
-/// calcul de la courbe "principale". Beaucoup de pilotes hwmon exposent
-/// des capteurs "placeholder" non câblés à un vrai composant qui
-/// renvoient exactement 0.0. Sans ce filtre, ces capteurs bidons
-/// dominaient visuellement le graphe.
-///
-/// Type `f32` (et non `f64`) : doit correspondre exactement au type du
-/// champ `SensorReading::temperature` pour pouvoir les comparer
-/// directement -- Rust n'effectue aucune conversion implicite entre f32
-/// et f64, contrairement à C/C++.
 const MIN_SIGNIFICANT_TEMP: f32 = 1.0;
 
-/// Les services (systemd/SCM) changent rarement d'état à l'échelle de
-/// quelques secondes -- pas besoin de les re-sonder à chaque tick de 1.5s
-/// comme le CPU/la RAM. On limite l'appel à `ServiceMonitor::refresh()`
-/// (qui spawn un process externe `systemctl`/`sc`) à une fois toutes les
-/// N itérations. Ce throttle est court-circuité juste après une action
-/// Démarrer/Arrêter/Redémarrer réussie (voir main.rs), qui déclenche un
-/// refresh() immédiat pour refléter le nouvel état sans attendre.
 const SERVICE_REFRESH_EVERY_N_TICKS: u32 = 4; // ~6s à 1.5s/tick
 
 pub struct AppState {
@@ -32,8 +15,6 @@ pub struct AppState {
     pub temperature_monitor: TemperatureMonitor,
     pub service_monitor: ServiceMonitor,
     pub cpu_history: VecDeque<f64>,
-    /// Historique d'UNE seule valeur "représentative" par tick (voir
-    /// `primary_temperature`), plutôt qu'un historique par capteur.
     pub temp_history: VecDeque<f64>,
     tick_count: u32,
 }
@@ -80,8 +61,6 @@ impl AppState {
     }
 }
 
-/// Choisit LA température à retenir pour la courbe principale, parmi
-/// toutes les lectures significatives (> MIN_SIGNIFICANT_TEMP).
 fn primary_temperature(readings: &[SensorReading]) -> Option<f64> {
     let significant: Vec<&SensorReading> = readings
         .iter()

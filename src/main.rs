@@ -1,3 +1,4 @@
+#![cfg_attr(windows, windows_subsystem = "windows")]
 mod process_monitor;
 mod services;
 mod state;
@@ -14,6 +15,7 @@ use fltk::{
     enums::{Align, Color, Event, Font, FrameType},
     frame::Frame,
     group::{Flex, Group, Tabs},
+    image::PngImage,
     input::Input,
     prelude::*,
     table::{Table, TableContext},
@@ -38,6 +40,8 @@ const ROW_BG_ODD: (u8, u8, u8) = (0x21, 0x22, 0x2c);
 const TEXT_LIGHT: (u8, u8, u8) = (0xf8, 0xf8, 0xf2);
 const TEXT_DARK: (u8, u8, u8) = (0x1e, 0x1f, 0x29);
 
+static ICON_BYTES: &[u8] = include_bytes!("../ressources/Icone.png");
+
 #[derive(Clone, Copy, PartialEq)]
 enum SortKey {
     Name,
@@ -55,8 +59,6 @@ const SERVICE_COLUMN_TITLES: [&str; 3] = ["Nom", "État", "Description"];
 const SERVICE_COL_WEIGHTS: [i32; 3] = [2, 2, 6];
 
 // --- Géométrie explicite pour Tabs et ses pages ---
-// (Fl_Tabs exige des Group comme enfants directs, pas des Flex -- d'où
-// les coordonnées absolues plutôt qu'un layout Flex dynamique ici.)
 const WINDOW_W: i32 = 1150;
 const WINDOW_H: i32 = 700;
 const TOP_BAR_H: i32 = 32;
@@ -132,21 +134,6 @@ impl Shared {
     }
 }
 
-/// Dessine une cellule d'en-tête de colonne NATIVE (contexte ColHeader de
-/// Fl_Table) : fond coloré façon bouton, titre, et flèche ▼/▲ optionnelle
-/// si cette colonne est la colonne de tri actuellement active.
-///
-/// IMPORTANT -- pourquoi un en-tête natif plutôt que des Frame séparés :
-/// le glisser-déposer pour redimensionner une colonne (col_resize) est
-/// une fonctionnalité gérée EXCLUSIVEMENT par l'en-tête natif de
-/// Fl_Table (zone de détection de bordure + curseur de redimensionnement
-/// intégrés au widget). Avec `set_col_header(false)` et un en-tête
-/// "maison" fait de Frame au-dessus du tableau (l'ancienne approche),
-/// `set_col_resize(true)` reste inerte : il n'existe tout simplement
-/// aucune bordure d'en-tête native à saisir à la souris. En dessinant
-/// notre style DANS le contexte ColHeader natif (plutôt qu'à côté), on
-/// garde exactement le même rendu visuel tout en récupérant le
-/// redimensionnement au glisser gratuitement, géré par FLTK lui-même.
 fn draw_col_header_cell(title: &str, sort_arrow: Option<&str>, x: i32, y: i32, w: i32, h: i32) {
     draw::push_clip(x, y, w, h);
     draw::draw_box(FrameType::UpBox, x, y, w, h, Color::from_rgb(HEADER_BG.0, HEADER_BG.1, HEADER_BG.2));
@@ -160,11 +147,6 @@ fn draw_col_header_cell(title: &str, sort_arrow: Option<&str>, x: i32, y: i32, w
     draw::pop_clip();
 }
 
-/// Répartit la largeur DISPONIBLE de `table` entre ses colonnes,
-/// proportionnellement aux `weights` fournis. Utilisé UNIQUEMENT à la
-/// construction initiale -- voir `scale_col_widths` pour le
-/// réajustement au redimensionnement de fenêtre, qui préserve lui les
-/// largeurs choisies manuellement par l'utilisateur (glisser-déposer).
 fn apply_weighted_col_widths(table: &mut Table, weights: &[i32]) {
     let total_weight: i32 = weights.iter().sum();
     if total_weight <= 0 {
@@ -185,16 +167,6 @@ fn apply_weighted_col_widths(table: &mut Table, weights: &[i32]) {
     table.redraw();
 }
 
-/// Réajuste les largeurs de colonnes existantes proportionnellement au
-/// changement de largeur globale du tableau (ratio nouvelle/ancienne
-/// largeur), plutôt que de les réinitialiser aux poids par défaut.
-///
-/// IMPORTANT : contrairement à `apply_weighted_col_widths` (utilisée une
-/// seule fois à la construction), cette fonction PRÉSERVE les largeurs
-/// que l'utilisateur aurait ajustées manuellement en glissant une
-/// bordure de colonne -- redimensionner la fenêtre ne doit pas annuler
-/// un ajustement manuel de l'utilisateur, seulement adapter proportion-
-/// nellement ce qui existe déjà à la nouvelle taille disponible.
 fn scale_col_widths(table: &mut Table, last_width: &mut i32) {
     let new_w = table.w();
     if *last_width <= 0 || new_w <= 0 || new_w == *last_width {
@@ -214,8 +186,7 @@ fn scale_col_widths(table: &mut Table, last_width: &mut i32) {
         table.set_col_width(c, neww);
         total += neww;
     }
-    // La dernière colonne absorbe l'écart d'arrondi pour que la somme
-    // corresponde exactement à la largeur disponible.
+
     let last_col = cols - 1;
     let current_last = table.col_width(last_col);
     let diff = new_w - total;
@@ -235,8 +206,11 @@ fn main() {
     app::set_visible_focus(false);
     app::set_font_size(13);
 
-    let mut window = Window::default().with_size(WINDOW_W, WINDOW_H).with_label("Gestionnaire de tâches");
+    let mut window = Window::default().with_size(WINDOW_W, WINDOW_H).with_label("Systeme Manager");
     window.set_color(Color::from_rgb(TEXT_DARK.0, TEXT_DARK.1, TEXT_DARK.2));
+
+    let icon = PngImage::from_data(ICON_BYTES).unwrap();
+    window.set_icon(Some(icon));
 
     let mut root = Flex::default_fill().column();
     root.set_margin(8);
@@ -290,9 +264,6 @@ fn main() {
         table.set_rows(0);
         table.set_row_header(false);
         table.set_cols(COLUMN_TITLES.len() as i32);
-        // En-tête NATIF (pas de Frame séparés) : condition nécessaire
-        // pour que le glisser-déposer de redimensionnement fonctionne
-        // réellement -- voir draw_col_header_cell ci-dessus.
         table.set_col_header(true);
         table.set_col_header_height(COL_HEADER_HEIGHT);
         table.set_row_height_all(ROW_HEIGHT);
@@ -408,35 +379,6 @@ fn main() {
     window.show();
 
     // --- Finalisation des largeurs de colonnes : double filet de sécurité ---
-    //
-    // HISTORIQUE DU PROBLÈME (pour référence future) : ni un appel direct
-    // après window.show(), ni un timeout à 0 seconde n'ont suffi en
-    // pratique à obtenir un table.w() reflétant la largeur réellement
-    // affichée -- les colonnes restaient minuscules (largeurs par défaut
-    // de Fl_Table) avec un grand espace vide à droite, quel que soit le
-    // délai ajouté avant l'appel. Cela suggère que Fl_Table peut recevoir
-    // sa taille définitive de la part de Fl_Flex en PLUSIEURS passes de
-    // layout successives (pas une seule, synchrone), potentiellement même
-    // après le tout premier passage de la boucle d'événements.
-    //
-    // STRATÉGIE RETENUE : plutôt que de deviner un délai arbitraire, on
-    // s'appuie sur un signal fiable émis par FLTK lui-même --
-    // Event::Resize sur la fenêtre. Ce signal peut se déclencher au moins
-    // une fois même sans intervention de l'utilisateur (lors du tout
-    // premier affichage, sur certaines plateformes/window managers). On
-    // combine donc DEUX mécanismes complémentaires :
-    //   1. Un timeout répété (toutes les 100ms, jusqu'à 20 tentatives)
-    //      qui vérifie si table.w() a atteint une taille "raisonnable"
-    //      (> 150px, largement supérieur à la somme des largeurs minimales
-    //      de colonnes) avant d'appliquer la répartition pondérée -- et
-    //      qui arrête de se répéter dès que l'application a réussi.
-    //   2. Le hook Event::Resize existant, qui applique la répartition
-    //      pondérée UNE SEULE FOIS (au premier redimensionnement détecté,
-    //      quelle qu'en soit la cause), puis bascule ensuite sur
-    //      scale_col_widths (qui préserve les ajustements manuels de
-    //      l'utilisateur) pour tous les redimensionnements suivants.
-    // Les deux mécanismes sont idempotents et sans effet de bord négatif
-    // s'ils s'exécutent tous les deux -- le premier qui réussit "gagne".
     const COL_WIDTH_MIN_SANE: i32 = 150;
     const COL_WIDTH_RETRY_MS: f64 = 0.1;
     const COL_WIDTH_MAX_RETRIES: u32 = 20;
@@ -449,9 +391,6 @@ fn main() {
             return;
         }
         if retries_left == 0 {
-            // Dernier recours : applique quand même avec la largeur
-            // disponible actuelle, même si elle semble suspecte -- mieux
-            // que de ne jamais rien appliquer du tout.
             apply_weighted_col_widths(table, &DETAILS_COL_WEIGHTS);
             apply_weighted_col_widths(table_services, &SERVICE_COL_WEIGHTS);
             return;
@@ -474,11 +413,6 @@ fn main() {
         window.handle(move |_w, ev| {
             if ev == Event::Resize {
                 if !first_resize_done {
-                    // Premier redimensionnement détecté (même celui lié à
-                    // l'affichage initial) : applique la répartition
-                    // pondérée avec la largeur désormais forcément réelle,
-                    // plutôt qu'un simple scale d'une valeur potentiellement
-                    // encore incorrecte capturée trop tôt.
                     apply_weighted_col_widths(&mut table_for_resize, &DETAILS_COL_WEIGHTS);
                     apply_weighted_col_widths(&mut table_services_for_resize, &SERVICE_COL_WEIGHTS);
                     first_resize_done = true;
@@ -620,7 +554,6 @@ fn main() {
         });
     }
 
-    // clic sur la table "Détails" -> distingue en-tête (tri) et cellule (sélection)
     {
         let shared = shared.clone();
         let mut selection_label = selection_label.clone();
@@ -670,7 +603,6 @@ fn main() {
         });
     }
 
-    // clic sur une ligne de service -> sélection (pas de tri sur cette table)
     {
         let shared = shared.clone();
         let mut service_status_label = service_status_label.clone();
@@ -869,7 +801,6 @@ fn refresh_widgets(
     drop(sh);
 }
 
-/// Dessine une courbe simple à partir d'un historique de valeurs.
 fn draw_history(x: i32, y: i32, w: i32, h: i32, values: impl Iterator<Item = f64>, min: f64, max: f64) {
     let range = (max - min).max(1.0);
 
@@ -898,7 +829,6 @@ fn draw_history(x: i32, y: i32, w: i32, h: i32, values: impl Iterator<Item = f64
     draw::pop_clip();
 }
 
-/// Dessine l'historique ET des repères textuels directement sur le graphe.
 fn draw_history_annotated(
     x: i32,
     y: i32,
