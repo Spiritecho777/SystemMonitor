@@ -1,20 +1,50 @@
 use std::collections::VecDeque;
 
+use crate::disks::{DiskMonitor, DiskRow};
 use crate::process_monitor::ProcessMonitor;
 use crate::services::{ServiceMonitor, ServiceRow};
+use crate::startup::{StartupEntry, StartupMonitor};
 use crate::temperature::{SensorReading, TemperatureMonitor};
 
 pub const HISTORY_LEN: usize = 120; // ~4 minutes d'historique à 2s/tick
 
+/// Seuil en dessous duquel une lecture de température est ignorée pour le
+/// calcul de la courbe "principale". Beaucoup de pilotes hwmon exposent
+/// des capteurs "placeholder" non câblés à un vrai composant qui
+/// renvoient exactement 0.0. Sans ce filtre, ces capteurs bidons
+/// dominaient visuellement le graphe.
+///
+/// Type `f32` (et non `f64`) : doit correspondre exactement au type du
+/// champ `SensorReading::temperature` pour pouvoir les comparer
+/// directement -- Rust n'effectue aucune conversion implicite entre f32
+/// et f64, contrairement à C/C++.
 const MIN_SIGNIFICANT_TEMP: f32 = 1.0;
 
+/// Les services (systemd/SCM) changent rarement d'état à l'échelle de
+/// quelques secondes -- pas besoin de les re-sonder à chaque tick de 1.5s
+/// comme le CPU/la RAM. On limite l'appel à `ServiceMonitor::refresh()`
+/// (qui spawn un process externe `systemctl`/`sc`) à une fois toutes les
+/// N itérations. Ce throttle est court-circuité juste après une action
+/// Démarrer/Arrêter/Redémarrer réussie (voir main.rs), qui déclenche un
+/// refresh() immédiat pour refléter le nouvel état sans attendre.
 const SERVICE_REFRESH_EVERY_N_TICKS: u32 = 4; // ~6s à 1.5s/tick
+
+/// Les applications de démarrage changent encore plus rarement (quasi
+/// jamais pendant que l'app tourne, sauf action explicite de
+/// l'utilisateur via l'onglet Démarrage lui-même). On ne les rafraîchit
+/// donc PAS automatiquement à chaque tick -- seulement au lancement, et
+/// explicitement après chaque ajout/suppression/activation depuis
+/// main.rs (voir StartupMonitor::refresh appelé après ces actions).
 
 pub struct AppState {
     pub process_monitor: ProcessMonitor,
     pub temperature_monitor: TemperatureMonitor,
     pub service_monitor: ServiceMonitor,
+    pub disk_monitor: DiskMonitor,
+    pub startup_monitor: StartupMonitor,
     pub cpu_history: VecDeque<f64>,
+    /// Historique d'UNE seule valeur "représentative" par tick (voir
+    /// `primary_temperature`), plutôt qu'un historique par capteur.
     pub temp_history: VecDeque<f64>,
     tick_count: u32,
 }
@@ -23,8 +53,11 @@ impl AppState {
     pub fn new() -> Self {
         let mut process_monitor = ProcessMonitor::new();
         let mut temperature_monitor = TemperatureMonitor::new();
-        // ServiceMonitor::new() fait déjà un premier refresh() en interne.
+        // ServiceMonitor::new()/StartupMonitor::new() font déjà un
+        // premier refresh() en interne.
         let service_monitor = ServiceMonitor::new();
+        let disk_monitor = DiskMonitor::new();
+        let startup_monitor = StartupMonitor::new();
         // premier refresh immédiat pour ne pas démarrer sur un état vide
         process_monitor.refresh();
         temperature_monitor.refresh();
@@ -33,6 +66,8 @@ impl AppState {
             process_monitor,
             temperature_monitor,
             service_monitor,
+            disk_monitor,
+            startup_monitor,
             cpu_history: VecDeque::with_capacity(HISTORY_LEN),
             temp_history: VecDeque::with_capacity(HISTORY_LEN),
             tick_count: 0,
@@ -42,6 +77,9 @@ impl AppState {
     pub fn refresh(&mut self) {
         self.process_monitor.refresh();
         self.temperature_monitor.refresh();
+        // Les disques ne coûtent qu'un appel système (pas de process
+        // externe), contrairement aux services -- pas besoin de throttle.
+        self.disk_monitor.refresh();
 
         self.tick_count = self.tick_count.wrapping_add(1);
         if self.tick_count % SERVICE_REFRESH_EVERY_N_TICKS == 0 {
@@ -59,8 +97,18 @@ impl AppState {
     pub fn services(&self) -> &[ServiceRow] {
         self.service_monitor.services()
     }
+
+    pub fn disks(&self) -> &[DiskRow] {
+        self.disk_monitor.rows()
+    }
+
+    pub fn startup_entries(&self) -> &[StartupEntry] {
+        self.startup_monitor.entries()
+    }
 }
 
+/// Choisit LA température à retenir pour la courbe principale, parmi
+/// toutes les lectures significatives (> MIN_SIGNIFICANT_TEMP).
 fn primary_temperature(readings: &[SensorReading]) -> Option<f64> {
     let significant: Vec<&SensorReading> = readings
         .iter()
@@ -104,4 +152,11 @@ pub fn human_bytes(bytes: u64) -> String {
         unit_idx += 1;
     }
     format!("{value:.1} {}", UNITS[unit_idx])
+}
+
+/// Formate un débit en octets/seconde (utilisé pour les colonnes
+/// lecture/écriture de l'onglet Disques). Réutilise `human_bytes` pour la
+/// mise à l'échelle des unités, en ajoutant simplement le suffixe "/s".
+pub fn human_bytes_per_sec(bytes_per_sec: f64) -> String {
+    format!("{}/s", human_bytes(bytes_per_sec.max(0.0) as u64))
 }

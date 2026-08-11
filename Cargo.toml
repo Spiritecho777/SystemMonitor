@@ -9,6 +9,9 @@ fltk = { version = "1", features = ["fltk-bundled"] }
 fltk-theme = "0.7"
 sysinfo = "0.39.6"
 
+[target.'cfg(windows)'.dependencies]
+winreg = "0.56"
+
 [profile.release]
 opt-level = 3
 lto = true
