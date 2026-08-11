@@ -2,6 +2,8 @@
 
 A cross-platform task manager (Linux / Windows) written in Rust with [FLTK](https://www.fltk.org/), inspired by the Windows Task Manager but designed to run just as well on a Linux desktop as on Windows, including in a remote (RDP) session without GPU acceleration.
 
+Completely vibecoder.
+
 ## Features
 
 - **Processes (Details tab)** — sortable (click on column headers) and filterable list by name, showing CPU %, memory, PID, and status. Columns are resizable by drag-and-drop and automatically adapt to window size.
